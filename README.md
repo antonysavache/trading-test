@@ -227,3 +227,4 @@ src/
 ## 📄 Лицензия
 
 MIT License
+# trading-test
