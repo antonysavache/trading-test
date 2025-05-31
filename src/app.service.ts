@@ -191,6 +191,14 @@ export class AppService implements OnModuleInit {
           pnl: pos.unrealizedPnl.toFixed(2) + '%',
           entryPrice: pos.entryPrice,
           currentPrice: pos.currentPrice,
+          // 🆕 Добавляем информацию о подтверждениях
+          confirmation: pos.confirmation ? {
+            btcTrend: pos.confirmation.btcTrend,
+            volumeProfile: pos.confirmation.volumeProfile,
+            overall: pos.confirmation.overall,
+            icon: pos.confirmation.overall ? '🟢' : '🟡',
+            status: pos.confirmation.overall ? 'ПОЛНОЕ' : 'ЧАСТИЧНОЕ',
+          } : null,
         })),
       },
     };

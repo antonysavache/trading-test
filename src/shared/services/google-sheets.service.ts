@@ -52,53 +52,135 @@ export class GoogleSheetsService implements IGoogleSheetsService {
           return throwError(() => new Error('GoogleSheetsService: GOOGLE_SHEETS_TRADING_SPREADSHEET_ID is not set!'));
         }
         
-        // Сортируем сигналы по дате (от старых к новым)
-        const sortedSignals = [...signals].sort((a, b) => {
-          return new Date(a.date).getTime() - new Date(b.date).getTime();
+        // Обрабатываем каждый сигнал отдельно
+        const operations = signals.map(signal => {
+          if (signal.result !== undefined) {
+            // Если есть результат - ищем и обновляем существующую запись
+            return this.updateExistingSignal(signal, sheetName);
+          } else {
+            // Если нет результата - добавляем новую запись
+            return this.addNewSignal(signal, sheetName);
+          }
         });
         
-        console.log(`GoogleSheetsService: Signals sorted by date. First date: ${sortedSignals[0]?.date}, Last date: ${sortedSignals[sortedSignals.length-1]?.date}`);
-        
-        // Преобразуем сигналы в формат для записи в таблицу
-        // Структура: date | symbol | VP | BTC | Order Book | open | side | tp | sl | result
-        const rows = sortedSignals.map(signal => [
-          `'${signal.date}`,           // дата как текст
-          `'${signal.symbol}`,         // символ как текст  
-          signal.VP,                   // VP как boolean
-          signal.BTC,                  // BTC как boolean
-          signal.orderBook,            // Order Book как boolean
-          parseFloat(String(signal.open)) || 0,  // цена входа как число
-          `'${signal.side}`,           // сторона как текст
-          parseFloat(String(signal.tp)) || 0,    // TP как число
-          parseFloat(String(signal.sl)) || 0,    // SL как число
-          signal.result !== undefined ? parseFloat(String(signal.result)) || 0 : ''  // результат как число или пустое
-        ]);
-
-        const range = `${sheetName}!A:J`;  // столбцы A-J
-        
-        console.log(`GoogleSheetsService: Appending ${rows.length} rows to spreadsheet ID: ${this.spreadsheetId}, range: ${range}`);
-        
-        return from(this.sheets!.spreadsheets.values.append({
-          spreadsheetId: this.spreadsheetId,
-          range: range,
-          valueInputOption: 'USER_ENTERED',
-          insertDataOption: 'INSERT_ROWS',
-          requestBody: {
-            values: rows
-          }
-        })).pipe(
+        // Выполняем все операции последовательно
+        return from(Promise.all(operations.map(op => op.toPromise()))).pipe(
           map(() => {
-            console.log(`GoogleSheetsService: Successfully saved ${signals.length} trading signals to ${sheetName}`);
+            console.log(`GoogleSheetsService: Successfully processed ${signals.length} trading signals in ${sheetName}`);
             return undefined as void;
           })
         );
       }),
       catchError(error => {
-        console.error(`GoogleSheetsService: Error saving trading signals to sheet ${sheetName}:`, error);
+        console.error(`GoogleSheetsService: Error processing trading signals in sheet ${sheetName}:`, error);
         if (error.response) {
           console.error(`Status: ${error.response.status}, Data:`, error.response.data);
         }
         return throwError(() => error);
+      })
+    );
+  }
+
+  /**
+   * Добавляет новый торговый сигнал в таблицу
+   */
+  private addNewSignal(signal: TradingSignal, sheetName: string): Observable<void> {
+    const row = [
+      `'${signal.date}`,           // дата как текст
+      `'${signal.symbol}`,         // символ как текст  
+      signal.VP,                   // VP как boolean
+      signal.BTC,                  // BTC как boolean
+      signal.orderBook,            // Order Book как boolean
+      parseFloat(String(signal.open)) || 0,  // цена входа как число
+      `'${signal.side}`,           // сторона как текст
+      parseFloat(String(signal.tp)) || 0,    // TP как число
+      parseFloat(String(signal.sl)) || 0,    // SL как число
+      ''                           // результат пустой для новой записи
+    ];
+
+    const range = `${sheetName}!A:J`;
+    
+    console.log(`GoogleSheetsService: Adding new signal: ${signal.symbol} ${signal.side} at ${signal.open}`);
+    
+    return from(this.sheets!.spreadsheets.values.append({
+      spreadsheetId: this.spreadsheetId,
+      range: range,
+      valueInputOption: 'USER_ENTERED',
+      insertDataOption: 'INSERT_ROWS',
+      requestBody: {
+        values: [row]
+      }
+    })).pipe(
+      map(() => {
+        console.log(`GoogleSheetsService: Successfully added new signal for ${signal.symbol}`);
+        return undefined as void;
+      })
+    );
+  }
+
+  /**
+   * Обновляет результат существующего торгового сигнала
+   */
+  private updateExistingSignal(signal: TradingSignal, sheetName: string): Observable<void> {
+    console.log(`GoogleSheetsService: Looking for existing signal to update: ${signal.symbol} ${signal.side} at ${signal.open} with result ${signal.result}%`);
+    
+    // Сначала получаем все данные из листа
+    const range = `${sheetName}!A:J`;
+    
+    return from(this.sheets!.spreadsheets.values.get({
+      spreadsheetId: this.spreadsheetId,
+      range: range
+    })).pipe(
+      switchMap(response => {
+        const rows = response.data.values || [];
+        
+        // Ищем строку с совпадающими параметрами (дата, символ, сторона, цена входа)
+        let targetRowIndex = -1;
+        
+        for (let i = 1; i < rows.length; i++) { // Начинаем с 1, пропуская заголовок
+          const row = rows[i];
+          if (row.length >= 7) {
+            const rowDate = String(row[0] || '').replace("'", '');
+            const rowSymbol = String(row[1] || '').replace("'", '');
+            const rowSide = String(row[6] || '').replace("'", '');
+            const rowOpen = parseFloat(String(row[5] || '0'));
+            
+            // Проверяем совпадение всех ключевых параметров
+            if (rowDate === signal.date && 
+                rowSymbol === signal.symbol && 
+                rowSide === signal.side &&
+                Math.abs(rowOpen - signal.open) < 0.000001) { // Сравниваем цены с погрешностью
+              targetRowIndex = i + 1; // +1 потому что Google Sheets индексация с 1
+              console.log(`GoogleSheetsService: Found matching signal at row ${targetRowIndex}`);
+              break;
+            }
+          }
+        }
+        
+        if (targetRowIndex === -1) {
+          console.log(`GoogleSheetsService: No matching signal found, adding as new record`);
+          return this.addNewSignal(signal, sheetName);
+        }
+        
+        // Обновляем только колонку J (результат) в найденной строке
+        const updateRange = `${sheetName}!J${targetRowIndex}`;
+        const resultValue = parseFloat(String(signal.result)) || 0;
+        
+        console.log(`GoogleSheetsService: Updating result in ${updateRange} with value ${resultValue}%`);
+        
+        return from(this.sheets!.spreadsheets.values.update({
+          spreadsheetId: this.spreadsheetId,
+          range: updateRange,
+          valueInputOption: 'USER_ENTERED',
+          requestBody: {
+            values: [[resultValue]]
+          }
+        })).pipe(
+          map(() => {
+            console.log(`GoogleSheetsService: Successfully updated result for ${signal.symbol} to ${signal.result}%`);
+            return undefined as void;
+          })
+        );
       })
     );
   }

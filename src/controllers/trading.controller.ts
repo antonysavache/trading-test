@@ -16,7 +16,23 @@ export class TradingController {
 
   @Get('positions/open')
   getOpenPositions() {
-    return this.tradingService.getOpenPositions();
+    const positions = this.tradingService.getOpenPositions();
+    return positions.map(pos => ({
+      id: pos.id,
+      symbol: pos.symbol,
+      direction: pos.direction,
+      entryPrice: pos.entryPrice,
+      currentPrice: pos.currentPrice,
+      unrealizedPnl: pos.unrealizedPnl,
+      takeProfitPrice: pos.takeProfitPrice,
+      stopLossPrice: pos.stopLossPrice,
+      entryTime: new Date(pos.entryTime).toISOString(),
+      triggerReason: pos.triggerReason,
+      // 🆕 Добавляем информацию о подтверждениях
+      confirmation: pos.confirmation,
+      confirmationIcon: pos.confirmation?.overall ? '🟢' : '🟡',
+      confirmationStatus: pos.confirmation?.overall ? 'ПОЛНОЕ' : 'ЧАСТИЧНОЕ',
+    }));
   }
 
   @Get('positions/closed')

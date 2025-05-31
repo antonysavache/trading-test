@@ -56,6 +56,7 @@ export class TradingService {
 
   /**
    * Создает торговый сигнал на основе найденного бокового движения
+   * 🆕 НОВАЯ ЛОГИКА: Входим во ВСЕ боковики, но отмечаем подтверждения фильтрами
    */
   async processSidewaysPattern(pattern: SidewaysPattern, currentPrice: number): Promise<TradingSignal | null> {
     if (!this.config.enabled) {
@@ -73,19 +74,16 @@ export class TradingService {
     let reason: string;
     
     if (pattern.direction === 'low_to_high_to_low') {
-      // Цена была внизу, пошла вверх, вернулась вниз - покупаем на отскоке
       direction = 'LONG';
       reason = `Боковик завершен возвратом к низу (${pattern.startPrice.toFixed(6)} → ${pattern.middlePrice.toFixed(6)} → ${currentPrice.toFixed(6)})`;
     } else {
-      // Цена была вверху, пошла вниз, вернулась вверх - продаем на отскоке
       direction = 'SHORT';
       reason = `Боковик завершен возвратом к верху (${pattern.startPrice.toFixed(6)} → ${pattern.middlePrice.toFixed(6)} → ${currentPrice.toFixed(6)})`;
     }
 
-    // 🔥 НОВАЯ ЛОГИКА: Проверяем есть ли противоположная позиция
+    // 🔥 ПРОВЕРЯЕМ ПРОТИВОПОЛОЖНУЮ ПОЗИЦИЮ
     const existingPosition = this.getPositionBySymbol(pattern.symbol);
     if (existingPosition && existingPosition.direction !== direction) {
-      // Найдена противоположная позиция - закрываем её
       this.closePositionByReversal(existingPosition, currentPrice, `Смена тренда: ${existingPosition.direction} → ${direction}`);
       this.logger.log(
         `🔄 СМЕНА НАПРАВЛЕНИЯ [${existingPosition.direction} → ${direction}] ${pattern.symbol} | ` +
@@ -93,51 +91,42 @@ export class TradingService {
       );
     }
 
-    // 🔥 НОВАЯ ЛОГИКА: Проверяем BTC тренд для подтверждения
+    // 🆕 НОВАЯ ЛОГИКА: Проверяем подтверждения, но НЕ блокируем сделку
+    const confirmation = {
+      btcTrend: false,
+      volumeProfile: true, // У нас есть боковое движение = volume profile подтверждение
+      overall: false
+    };
+
+    const confirmationDetails: string[] = [];
+
+    // 1. Проверяем BTC тренд для подтверждения
     const btcTrendAnalysis = this.btcTrendService.getBTCTrendAnalysis();
-    
-    if (!this.btcTrendService.isDirectionAllowed(direction)) {
-      const btcTrend = btcTrendAnalysis?.trend || 'UNKNOWN';
-      this.logger.log(
-        `🚫 СДЕЛКА ОТКЛОНЕНА [${direction}] ${pattern.symbol} | ` +
-        `BTC тренд: ${btcTrend} не поддерживает ${direction} позицию | ` +
-        `EMA20: ${btcTrendAnalysis?.ema20.toFixed(2)} vs EMA50: ${btcTrendAnalysis?.ema50.toFixed(2)}`
-      );
-      return null;
+    if (this.btcTrendService.isDirectionAllowed(direction)) {
+      confirmation.btcTrend = true;
+      confirmationDetails.push(`✅ BTC ${btcTrendAnalysis?.trend || 'UNKNOWN'}`);
+    } else {
+      confirmation.btcTrend = false;
+      confirmationDetails.push(`❌ BTC ${btcTrendAnalysis?.trend || 'UNKNOWN'}`);
     }
 
-    // 🔥 НОВАЯ ЛОГИКА: Проверяем Order Book для подтверждения
+    // 2. Проверяем Order Book для подтверждения (не блокируем, только отмечаем)
+    let orderBookConfirmed = false;
     try {
       const orderBookAnalysis = await this.orderBookService.getOrderBookAnalysis(pattern.symbol);
-      const orderBookSupport = this.orderBookService.isDirectionSupported(direction, orderBookAnalysis);
+      orderBookConfirmed = this.orderBookService.isDirectionSupported(direction, orderBookAnalysis);
       
-      if (!orderBookSupport) {
-        this.logger.log(
-          `📚 СДЕЛКА ОТКЛОНЕНА [${direction}] ${pattern.symbol} | ` +
-          `Order Book не поддерживает направление | ` +
-          `BID/ASK: ${orderBookAnalysis.bidAskRatio.toFixed(2)} | ` +
-          `BID: $${(orderBookAnalysis.totalBidVolume/1000).toFixed(0)}k | ` +
-          `ASK: $${(orderBookAnalysis.totalAskVolume/1000).toFixed(0)}k`
-        );
-        return null;
+      if (orderBookConfirmed) {
+        confirmationDetails.push(`✅ OrderBook (${orderBookAnalysis.bidAskRatio.toFixed(2)})`);
+      } else {
+        confirmationDetails.push(`❌ OrderBook (${orderBookAnalysis.bidAskRatio.toFixed(2)})`);
       }
-
-      // Order Book подтверждает направление!
-      this.logger.log(
-        `📚 ORDER BOOK ПОДТВЕРЖДАЕТ [${direction}] ${pattern.symbol} | ` +
-        `BID/ASK: ${orderBookAnalysis.bidAskRatio.toFixed(2)} | ` +
-        `Strength: ${orderBookAnalysis.strength} | ` +
-        `${direction === 'LONG' ? 'Bullish' : 'Bearish'} signal: ${direction === 'LONG' ? orderBookAnalysis.bullishSignal : orderBookAnalysis.bearishSignal}`
-      );
-
     } catch (error) {
-      this.logger.warn(`⚠️ Order Book анализ недоступен для ${pattern.symbol}, продолжаем без него`);
+      confirmationDetails.push(`⚠️ OrderBook недоступен`);
     }
 
-    // BTC тренд подтверждает сделку!
-    const btcConfirmation = btcTrendAnalysis 
-      ? `BTC ${btcTrendAnalysis.trend} (EMA20: ${btcTrendAnalysis.ema20.toFixed(2)} vs EMA50: ${btcTrendAnalysis.ema50.toFixed(2)})`
-      : 'BTC тренд не инициализирован';
+    // 3. Общее подтверждение - если все фильтры подтверждают
+    confirmation.overall = confirmation.btcTrend && confirmation.volumeProfile && orderBookConfirmed;
 
     // Рассчитываем уровни TP и SL
     const takeProfitPrice = direction === 'LONG' 
@@ -153,11 +142,19 @@ export class TradingService {
       direction,
       entryPrice: currentPrice,
       timestamp: Date.now(),
-      reason: `${reason} | ${btcConfirmation}`,
+      reason: `${reason} | Подтверждения: ${confirmationDetails.join(', ')}`,
       takeProfitPrice: Number(takeProfitPrice.toFixed(8)),
       stopLossPrice: Number(stopLossPrice.toFixed(8)),
       sidewaysPattern: pattern,
+      confirmation: confirmation, // 🆕 Добавляем поле подтверждения
     };
+
+    // 🆕 НОВАЯ ЛОГИКА: Логируем с информацией о подтверждениях
+    const confirmIcon = confirmation.overall ? '🟢' : '🟡';
+    this.logger.log(
+      `${confirmIcon} СИГНАЛ СОЗДАН [${direction}] ${pattern.symbol} | ` +
+      `Подтверждений: ${confirmationDetails.join(' | ')}`
+    );
 
     return signal;
   }
@@ -178,14 +175,20 @@ export class TradingService {
       status: 'OPEN',
       unrealizedPnl: 0,
       triggerReason: signal.reason,
+      confirmation: signal.confirmation, // 🆕 Сохраняем информацию о подтверждениях
     };
 
     this.openPositions.set(position.id, position);
     this.stats.totalTrades++;
     this.stats.openTrades++;
     
-    this.logger.log(`🔥 ПОЗИЦИЯ ОТКРЫТА [${position.direction}] ${position.symbol} по ${this.formatPrice(position.entryPrice)} | TP: ${this.formatPrice(position.takeProfitPrice)} | SL: ${this.formatPrice(position.stopLossPrice)}`);
-    this.logger.log(`📊 Причина: ${position.triggerReason}`);
+    // 🆕 Отображаем иконку в зависимости от подтверждений
+    const confirmIcon = position.confirmation.overall ? '🟢' : '🟡';
+    const confirmText = position.confirmation.overall ? 'ПОЛНОЕ ПОДТВЕРЖДЕНИЕ' : 'ЧАСТИЧНОЕ ПОДТВЕРЖДЕНИЕ';
+    
+    this.logger.log(`🔥 ${confirmIcon} ПОЗИЦИЯ ОТКРЫТА [${position.direction}] ${position.symbol} по ${this.formatPrice(position.entryPrice)} | ${confirmText}`);
+    this.logger.log(`📊 TP: ${this.formatPrice(position.takeProfitPrice)} | SL: ${this.formatPrice(position.stopLossPrice)}`);
+    this.logger.log(`📋 Подтверждения: BTC=${position.confirmation.btcTrend ? '✅' : '❌'} | VP=✅ | OrderBook=${position.confirmation.volumeProfile ? '✅' : '❌'}`);
 
     // 🆕 Сохраняем торговый сигнал в Google Sheets
     this.saveSignalToGoogleSheets(signal, position);
@@ -422,17 +425,12 @@ export class TradingService {
    */
   private async saveSignalToGoogleSheets(signal: TradingSignal, position: TradingPosition): Promise<void> {
     try {
-      // Определяем подтверждения на основе анализа в reason
-      const hasVP = true; // У нас есть боковое движение (volume profile)
-      const hasBTC = signal.reason.includes('BTC');
-      const hasOrderBook = signal.reason.includes('Order Book') || signal.reason.includes('ORDER BOOK');
-
       const googleSheetsSignal: GoogleSheetsSignal = {
         date: new Date().toISOString().split('T')[0], // Текущая дата в формате YYYY-MM-DD
         symbol: signal.symbol,
-        VP: hasVP,
-        BTC: hasBTC,
-        orderBook: hasOrderBook,
+        VP: signal.confirmation.volumeProfile, // Volume Profile подтверждение
+        BTC: signal.confirmation.btcTrend, // BTC тренд подтверждение
+        orderBook: signal.confirmation.overall, // Общее подтверждение (включая OrderBook)
         open: signal.entryPrice,
         side: signal.direction.toLowerCase() as 'long' | 'short',
         tp: signal.takeProfitPrice,
@@ -441,7 +439,8 @@ export class TradingService {
 
       await this.signalService.createTradingSignal(googleSheetsSignal, 'page');
       
-      this.logger.log(`📊 Торговый сигнал сохранен в Google Sheets: ${signal.symbol} ${signal.direction}`);
+      const confirmStatus = signal.confirmation.overall ? '🟢 ПОЛНОЕ' : '🟡 ЧАСТИЧНОЕ';
+      this.logger.log(`📊 Торговый сигнал сохранен в Google Sheets: ${signal.symbol} ${signal.direction} | ${confirmStatus} подтверждение`);
     } catch (error) {
       this.logger.error(`❌ Ошибка сохранения сигнала в Google Sheets: ${error.message}`);
     }
@@ -452,17 +451,12 @@ export class TradingService {
    */
   private async updateSignalResultInGoogleSheets(position: TradingPosition): Promise<void> {
     try {
-      // Определяем подтверждения на основе анализа в triggerReason
-      const hasVP = true; // У нас есть боковое движение (volume profile)
-      const hasBTC = position.triggerReason?.includes('BTC') || false;
-      const hasOrderBook = position.triggerReason?.includes('Order Book') || position.triggerReason?.includes('ORDER BOOK') || false;
-
       const googleSheetsSignal: GoogleSheetsSignal = {
         date: new Date(position.entryTime).toISOString().split('T')[0], // Дата входа
         symbol: position.symbol,
-        VP: hasVP,
-        BTC: hasBTC,
-        orderBook: hasOrderBook,
+        VP: position.confirmation.volumeProfile, // Volume Profile подтверждение
+        BTC: position.confirmation.btcTrend, // BTC тренд подтверждение
+        orderBook: position.confirmation.overall, // Общее подтверждение (включая OrderBook)
         open: position.entryPrice,
         side: position.direction.toLowerCase() as 'long' | 'short',
         tp: position.takeProfitPrice,
@@ -472,7 +466,9 @@ export class TradingService {
 
       await this.signalService.updateTradingSignalResult(googleSheetsSignal, 'page');
       
-      this.logger.log(`📊 Результат торгового сигнала обновлен в Google Sheets: ${position.symbol} ${position.realizedPnl?.toFixed(2)}%`);
+      const pnlIcon = (position.realizedPnl ?? 0) > 0 ? '✅' : '❌';
+      const confirmStatus = position.confirmation.overall ? '🟢' : '🟡';
+      this.logger.log(`📊 ${pnlIcon} Результат обновлен в Google Sheets: ${position.symbol} ${position.realizedPnl?.toFixed(2)}% | ${confirmStatus}`);
     } catch (error) {
       this.logger.error(`❌ Ошибка обновления результата в Google Sheets: ${error.message}`);
     }

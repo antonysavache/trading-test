@@ -22,6 +22,13 @@ export interface TradingPosition {
   // Метаданные
   triggerReason: string; // Почему была открыта позиция
   closeReason?: string; // Почему была закрыта
+  
+  // 🆕 Подтверждение фильтрами
+  confirmation: {
+    btcTrend: boolean; // Подтверждается ли BTC трендом
+    volumeProfile: boolean; // Подтверждается ли Volume Profile
+    overall: boolean; // Общее подтверждение (все фильтры)
+  };
 }
 
 export interface TradingSignal {
@@ -37,6 +44,13 @@ export interface TradingSignal {
   
   // Дополнительная информация
   sidewaysPattern?: any; // Паттерн, который вызвал сигнал
+  
+  // 🆕 Подтверждение фильтрами (заполняется при создании сигнала)
+  confirmation: {
+    btcTrend: boolean; // Подтверждается ли BTC трендом
+    volumeProfile: boolean; // Подтверждается ли Volume Profile
+    overall: boolean; // Общее подтверждение (все фильтры)
+  };
 }
 
 export interface TradingStats {
